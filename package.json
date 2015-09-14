@@ -1,0 +1,33 @@
+{
+  "name": "ads-node-client",
+  "version": "0.0.1",
+  "description": "ADS TWINCAT client for Node.js",
+  "main": "adsNodeClient.js",
+  "directories": {
+    "test": "test"
+  },
+  "dependencies": {
+    "bunyan": "^1.5.1"
+  },
+  "devDependencies": {},
+  "scripts": {
+    "test": "node test/test.js | bunyan -o short"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cyrillius/adsNodeClient.git"
+  },
+  "keywords": [
+    "ADS",
+    "TWINCAT",
+    "Beckhoff",
+    "AMS",
+    "PLC"
+  ],
+  "author": "Cyril Praz",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/Cyrillius/adsNodeClient/issues"
+  },
+  "homepage": "https://github.com/Cyrillius/adsNodeClient#readme"
+}
