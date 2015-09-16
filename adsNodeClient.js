@@ -34,9 +34,9 @@ var net = require('net');
 // Log Manager
 var log = null;
 
-/** 
+/******************************************************************************************************************
 * Client Class
-*/
+*******************************************************************************************************************/
 var Client = function(options){
 
 	// Attributes
@@ -52,8 +52,8 @@ var Client = function(options){
 	this.socket = null;
 	this.symbols = [];
 	this.listeners = [];
-	this.pendingTrans = new Buffer(10);
-
+	this.pendingTrans = new Buffer(100);
+	console.log(options);
 
 	//Initialize the log manager
 	log = bunyan.createLogger({
@@ -96,14 +96,14 @@ var Client = function(options){
 
 	// Initialize Event Emitter
 	Emitter.call(this);
+	this.setMaxListeners(100);
 
 	// If autoconnect try to connect now 
 	if (options.host !== null) this.open();
 };
 
-/**
- * Inherits from Event Emitter.
- */
+
+// Inherits from Event Emitter. 
 util.inherits(Client, Emitter);
 
 /******************************************************************************************************************
@@ -127,8 +127,8 @@ Client.prototype.open = function (){
     // Bind events
     this.socket.on('connect', this.onConnect);
     this.socket.on('data', this.onData);
-    this.socket.on('end', this.onEnd);
-    this.socket.on('close', this.onClose);
+    this.socket.once('end', this.onEnd);
+    this.socket.once('close', this.onClose);
     this.socket.on('onError', this.onError);
     this.socket.on('onTimeout', this.onTimeout);
 
@@ -157,9 +157,9 @@ Client.prototype.open = function (){
     return this.socket;
 };
 
-/**
+/******************************************************************************************************************
 * Close the socket and remove event listener
-*/
+*******************************************************************************************************************/
 Client.prototype.close = function (){
 
 	//remove listeners
@@ -175,9 +175,9 @@ Client.prototype.close = function (){
 
 };
 
-/**
+/******************************************************************************************************************
 * Read device information	
-*/
+*******************************************************************************************************************/
 Client.prototype.readDeviceInfo = function (cb){
 	log.info("read device info");
 	var h = {
@@ -205,9 +205,9 @@ Client.prototype.readDeviceInfo = function (cb){
 	return h.invokeID;
 };
 
-/**
+/******************************************************************************************************************
 * Read device information	
-*/
+*******************************************************************************************************************/
 Client.prototype.readState = function (cb){
 	log.info("read state");
 	var h = {
@@ -238,9 +238,9 @@ Client.prototype.readState = function (cb){
 };
 
 
-/**
+/******************************************************************************************************************
 *	ADS read command
-*/
+*******************************************************************************************************************/
 Client.prototype.receive =
 Client.prototype.read = function (options,cb){
 	log.info("read value");
@@ -271,9 +271,9 @@ Client.prototype.read = function (options,cb){
 	return h.invokeID;
 };
 
-/**
+/******************************************************************************************************************
 *	ADS write command
-*/
+*******************************************************************************************************************/
 Client.prototype.send =
 Client.prototype.write = function(options,cb){
 	log.info("write value");
@@ -304,9 +304,9 @@ Client.prototype.write = function(options,cb){
 	return h.invokeID;
 };
 
-/**
+/******************************************************************************************************************
 *	ADS sumup read command
-*/
+*******************************************************************************************************************/
 Client.prototype.multiReceive =
 Client.prototype.multiRead = function (options,cb){
 	log.info("read multiple value");
@@ -314,20 +314,35 @@ Client.prototype.multiRead = function (options,cb){
 
 };
 
-/**
+/******************************************************************************************************************
 *	ADS sumup write command
-*/
+*******************************************************************************************************************/
 Client.prototype.multiSend =
 Client.prototype.multiWrite = function(){
 	log.info("write multiple value");
 	log.info("This function is not yet implemented, sorry");
 };
 
-/**
+/******************************************************************************************************************
 *	ADS add device notification
-*/
+*******************************************************************************************************************/
 Client.prototype.subscribe = function (options, cb){
 	log.info("start listening a value");
+	// check if there is already a notifHandle for the value
+	for(var i=0; i<this.listeners.length; i++){
+		if(options.indexGroup === undefined && options.indexGroup === undefined && options.symname !== undefined){
+				if(this.listeners[i].symname.toUpperCase() = options.symname.toUpperCase()){
+					log.debug("This value is already listening");
+					return null;
+				}
+		}
+		else if(options.indexGroup !== undefined && options.indexGroup !== undefined ){
+				if(this.listeners[i].symname.toUpperCase() = options.symname.toUpperCase()){
+					log.debug("This value is already listening");
+					return null;
+				}		
+		}
+	}
 	var h = {
 		indexGroup: options.indexGroup,
 		indexOffset: options.indexOffset,
@@ -337,34 +352,71 @@ Client.prototype.subscribe = function (options, cb){
 		transmissionMode:  options.transmissionMode || NOTIFY_TYPE.ONCHANGE,
 		maxDelay: options.maxDelay || 0,
 		cycleTime: options.cycleTime || 10
+	};
+	var client = this;
+
+	// Check if the symbol exist and add informations
+	var hp = this.checkIndex(h);
+	if(hp==null){
+		//Failed to find the symbol try to get the handle
+		this.getSymHandleByName(options.symname, function(symHandle){
+			hp = {
+				indexGroup: 0xF005,
+				indexOffset: symHandle,
+				invokeID: client.getInvokeID(),
+				commandID: CMD_ID.ADD_NOTIFICATION,
+				transmissionMode:  options.transmissionMode || NOTIFY_TYPE.ONCHANGE,
+				bytelength: options.bytelength,
+				maxDelay: options.maxDelay || 0,
+				cycleTime: options.cycleTime || 10
+			};
+			var data = client.genDataFrame(hp);
+			var frame = client.genTcpFrame(hp, data); 
+
+			// add  callback to the listener
+			client.once('addNotifResponse',function(response){
+
+				if( response.amsHeader.invokeId  == hp.invokeID) {
+					if(cb !== undefined) cb(response);	
+					// Add the notification handle with info to the table
+					client.listeners[response.data.notifHandle] = h;
+					// We can release the invoke Id for another transaction
+					client.pendingTrans[h.invokeID]=false;	
+					log.debug("Notification Handler received",response.data.notifHandle);	
+				}
+			});
+			log.info("Sending addNotifRequest",hp)
+			// write the frame
+			client.socket.write(frame);
+		});
+		return null
+	}
+	else{
+		var data = this.genDataFrame(h);
+		var frame = this.genTcpFrame(h, data); 
+
+		// add  callback to the listener
+		this.once('addNotifResponse',function(response){
+			if( response.amsHeader.invokeId  == h.invokeID) {
+				if(cb !== undefined) cb(response);	
+				// Add the notification handle with info to the table
+				client.listeners[response.data.notifHandle] = h;
+				// We can release the invoke Id for another transaction
+				client.pendingTrans[h.invokeID]=false;	
+				log.debug("Notification Handler received",response.data.notifHandle);	
+			}
+		});
+
+		// write the frame
+		this.socket.write(frame);
+		return hp.invokeID;
 	}
 
-	h =  this.checkIndex(h);
-	var data = this.genDataFrame(h);
-	var frame = this.genTcpFrame(h, data); 
-
-	var client = this;
-	// add  callback to the listener
-	this.once('addNotifResponse',function(response){
-		if( response.amsHeader.invokeId  == h.invokeID) {
-			if(cb !== undefined) cb(response);	
-			// Add the notification handle with info to the table
-			client.listeners[response.data.notifHandle] = h;
-			// We can release the invoke Id for another transaction
-			client.pendingTrans[h.invokeID]=false;	
-			log.debug("Notification Handler received",response.data.notifHandle);	
-		}
-	});
-
-	// write the frame
-	this.socket.write(frame);
-
-	return h.invokeID;
 };
 
-/**
+/******************************************************************************************************************
 *	ADS delete device notification
-*/
+*******************************************************************************************************************/
 Client.prototype.unsubscribe = function (){
 	log.info("stop listening a value");
 	var h = {
@@ -397,9 +449,9 @@ Client.prototype.unsubscribe = function (){
 
 };
 
-/**
+/******************************************************************************************************************
 *	ADS get uploaded symbols command
-*/
+*******************************************************************************************************************/
 Client.prototype.getSymbols = function (length,cb){
 	log.info("Get symbol list");
 	var h = {
@@ -459,9 +511,9 @@ Client.prototype.getSymbols = function (length,cb){
 	return h.invokeID;
 };
 
-/**
+/******************************************************************************************************************
 *	ADS get symbols size command
-*/
+*******************************************************************************************************************/
 Client.prototype.getSymbolsSize = function (cb){
 	log.info("Get symbol list size");
 	var h = {
@@ -491,20 +543,52 @@ Client.prototype.getSymbolsSize = function (cb){
 	return h.invokeID;
 };
 
-/**
+/******************************************************************************************************************
 *  ADS get symbol handle by name
-*/
-Client.prototype.getSymHandleByName = function (){
+*******************************************************************************************************************/
+Client.prototype.getSymHandleByName = function (symname,cb){
 	log.info("Get handle by symbol name");
-	log.info("This function is not yet implemented, sorry");
+    var h = {
+    	invokeID: this.getInvokeID(),
+        indexGroup: 0x0000F003,
+        indexOffset: 0x00000000,
+        readLength: 4,
+        value: symname,
+        writeLength: symname.length,
+        commandID: CMD_ID.READ_WRITE,
+    };
+
+	var data = this.genDataFrame(h);
+	var frame = this.genTcpFrame(h, data);     
+
+	// add  callback to the listener
+	this.once('readWriteResponse',function(response){
+		if( response.amsHeader.invokeId == h.invokeID){ 
+			var symhandle = response.data.value;
+			cb(symhandle);
+			this.pendingTrans[h.invokeID] = false;
+		}
+	});
+
+	log.debug("sending getSymHandleByName request");
+	// write the frame
+	this.socket.write(frame);
+	return h.invokeID;
 };
 
 
-
+/******************************************************************************************************************
+* ON CONNECT EVENT
+******************************************************************************************************************/
 Client.prototype.onConnect = function (){
 	log.info('The connection is now open');
+	this.emit('connect');
+	return true;
 };
 
+/******************************************************************************************************************
+* ON  DATA EVENT
+******************************************************************************************************************/
 Client.prototype.onData = function (data){
 	log.debug('Some data has been received', data);
 	//Get data
@@ -660,18 +744,20 @@ Client.prototype.onData = function (data){
 		    		// Get information from the notification handle
 		    		var h = this.client.listeners[response.data.stamps[i].samples[j].notifHandle];
 		   			log.debug("Notif Handler",response.data.stamps[i].samples[j]);
-		    		var m = {
-		    			tcpHeader: response.tcpHeader,
-		    			amsHeader: response.amsHeader,
-		    			data: {
-		    				notifHandle: response.data.stamps[i].samples[j].notifHandle,
-			    			indexGroup: h.indexGroup,
-			    			indexOffset: h.indexOffset,
-			    			symname: h.symname,
-			    			value: response.data.stamps[i].samples[j].value
-		    			}
-		    		};
-		    		this.client.emit('valueChange',m)
+		   			if(h !== undefined){
+			    		var m = {
+			    			tcpHeader: response.tcpHeader,
+			    			amsHeader: response.amsHeader,
+			    			data: {
+			    				notifHandle: response.data.stamps[i].samples[j].notifHandle,
+				    			indexGroup: h.indexGroup,
+				    			indexOffset: h.indexOffset,
+				    			symname: h.symname,
+				    			value: response.data.stamps[i].samples[j].value
+			    			}
+			    		};
+			    		this.client.emit('valueChange',m);
+			    	}
     			}
     		} 	
 
@@ -685,11 +771,11 @@ Client.prototype.onData = function (data){
     }
 
     if (response.amsHeader.errorId > 0)
-    	log.error(getError(response.amsHeader.errorId));
+    	log.error(getError(response.amsHeader.errorId),response);
 
     if (response.data.result !== undefined)
 	    if (response.data.result > 0)
-	    	log.error(getError(response.data.result));
+	    	log.error(getError(response.data.result),response);
 
     log.debug ("parsed response:", response);
     this.client.emit ("receive", response);
@@ -698,26 +784,45 @@ Client.prototype.onData = function (data){
     return true;  
 };
 
+/******************************************************************************************************************
+* ON END EVENT HANDLE
+******************************************************************************************************************/
 Client.prototype.onEnd = function (){
 	log.info('The other end close the socket');
 	this.emit('end');
+	return true;
 };
 
+/******************************************************************************************************************
+* ON CLOSE EVENT HANDLE
+******************************************************************************************************************/
 Client.prototype.onClose = function (){
 	log.info('The socket is closed');
 	this.emit('close');
+	return true;
 };
 
+/******************************************************************************************************************
+* ON ERROR EVENT HANDLE
+******************************************************************************************************************/
 Client.prototype.onError = function (error){
 	log.error('An error has happened \n'+ error);
 	this.emit('error',error);
+	return true;
 };
 
+/******************************************************************************************************************
+* ON TIMEOUT EVENT HANDLE
+******************************************************************************************************************/
 Client.prototype.onTimeout = function (){
 	log.info('The connection has timed out');
 	this.emit('timeout');
+	return true;
 };
 
+/******************************************************************************************************************
+* Get invoke id
+******************************************************************************************************************/
 Client.prototype.getInvokeID = function (){	
 	log.debug("Transaction in progress",this.pendingTrans);
 	var enoughPlace = false;
@@ -738,13 +843,17 @@ Client.prototype.getInvokeID = function (){
 	return id;
 };
 
+/******************************************************************************************************************
+* Check Index
+******************************************************************************************************************/
 Client.prototype.checkIndex = function(o){
 	// If we want to work with symbol name
 	if(o.indexGroup === undefined && o.indexOffset === undefined && o.symname !== undefined){
+		var symname = o.symname.toUpperCase();
 		var index = null;
 		// Look up for the symbol inside the symbol table
 		for(var i=0; i<this.symbols.length; i++){
-			if(this.symbols[i].name == o.symname) index = i ;
+			if(this.symbols[i].name == symname) index = i ;
 		}
 		// If we find something we can set the handle
 		if(index !== null){
@@ -754,7 +863,8 @@ Client.prototype.checkIndex = function(o){
 		}
 		// Else we throw an error
 		else{
-			log.error("The symbol doesn't exist",o);
+			log.warn("The symbol doesn't exist",o);
+			return null;
 		}
 	}
 	else if(o.indexGroup !== undefined && o.indexOffset !== undefined){
@@ -768,9 +878,9 @@ Client.prototype.checkIndex = function(o){
 			o.symname = this.symbols[index].name;
 			if (o.bytelength === undefined) o.bytelength = ADS_TYPE[this.symbols[index].type];
 		}
-		// Maybe if it's a service there is not necessary a symbol linked
+		// Else try to send
 		else{
-			log.debug("The symbol doesn't exist. Maybe it's a service",o);
+			log.debug("The symbol doesn't exist Try to send",o);
 		}
 	}
 	else {
@@ -781,6 +891,10 @@ Client.prototype.checkIndex = function(o){
 	return o;
 
 };
+
+/******************************************************************************************************************
+* Generate Data Frame
+******************************************************************************************************************/
 Client.prototype.genDataFrame = function (h){
 	// Start to generate the frame
 	var dataFrame;
@@ -842,24 +956,30 @@ Client.prototype.genDataFrame = function (h){
 			dataFrame = new Buffer(FRAME_SIZE.NOTIF_HANDLE);
 			dataFrame.writeUInt32LE(h.notifHandle,0);
 			break; 
+
 		case CMD_ID.READ_WRITE :
+			dataSize = h.writeLength;
 			dataFrame = new Buffer(FRAME_SIZE.INDEX_GRP + FRAME_SIZE.INDEX_OFFSET + FRAME_SIZE.LENGTH + FRAME_SIZE.LENGTH + dataSize);
 			dataFrame.writeUInt32LE(h.indexGroup,0);
 			dataFrame.writeUInt32LE(h.indexOffset,4);
-			dataFrame.writeUInt32LE(h.readlength,8);
-			dataFrame.writeUInt32LE(h.writelength,12);
-	    	switch(handle.bytelength) {
-		        case 1: 	dataFrame.writeUInt8(handle.value, 16); 									break;
-		        case 2: 	dataFrame.writeUInt16(handle.value, 16); 									break;
-		        case 4: 	dataFrame.writeUInt32(handle.value, 16);									break;
-		        case 8: 	dataFrame.writeUInt64(handle.value, 16);  									break;
-		        default: 	dataFrame.write(handle.value + "\0", 16, handle.value.length, "utf8");  	break;
-	    	}			
+			dataFrame.writeUInt32LE(h.readLength,8);
+			dataFrame.writeUInt32LE(h.writeLength,12);
+	    	switch(h.bytelength) {
+		        case 1: 	dataFrame.writeUInt8(h.value, 16); 										break;
+		        case 2: 	dataFrame.writeUInt16(h.value, 16); 									break;
+		        case 4: 	dataFrame.writeUInt32(h.value, 16);										break;
+		        case 8: 	dataFrame.writeUInt64(h.value, 16);  									break;
+		        default: 	dataFrame.write(h.value + "\0", 16, h.value.length, "utf8");  			break;
+	    	}	
 			break; 
 	}
 
 	return dataFrame;
 };
+
+/******************************************************************************************************************
+* Generate TCP Frame
+******************************************************************************************************************/
 Client.prototype.genTcpFrame = function(h,d){
 	var   	dataSize 		= d.length;
 
@@ -898,6 +1018,10 @@ Client.prototype.genTcpFrame = function(h,d){
 
 	return frame;
 };
+
+/******************************************************************************************************************
+* HELPERS and CONSTANTS
+******************************************************************************************************************/
 
 /** 
 * FRAME SIZE
