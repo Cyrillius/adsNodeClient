@@ -5,7 +5,7 @@
 *	Author: Cyril Praz
 *	Date: 10.10.2015	
 *
-*   Copyright (c) 2015 Cyrillius
+*   Copyright (c) 2015 Cyril Praz
 *
 *   Permission is hereby granted, free of charge, to any person obtaining a 
 *   copy of this software and associated documentation files (the "Software"), 
@@ -52,7 +52,7 @@ var Client = function(options){
 	this.socket = null;
 	this.symbols = [];
 	this.listeners = [];
-	this.pendingTrans = new Buffer(100);
+	this.pendingTrans = new Buffer(200);
 	console.log(options);
 
 	//Initialize the log manager
@@ -282,9 +282,11 @@ Client.prototype.write = function(options,cb){
 		indexOffset: options.indexOffset,
 		symname: options.symname,
 		invokeID: this.getInvokeID(),
-		commandID: CMD_ID.WRITE
+		commandID: CMD_ID.WRITE,
+		value: options.value
 	}; 
 	h =  this.checkIndex(h);
+	console.log(h);
 	var data = this.genDataFrame(h);
 	var frame = this.genTcpFrame(h, data); 
 
@@ -331,16 +333,20 @@ Client.prototype.subscribe = function (options, cb){
 	// check if there is already a notifHandle for the value
 	for(var i=0; i<this.listeners.length; i++){
 		if(options.indexGroup === undefined && options.indexGroup === undefined && options.symname !== undefined){
-				if(this.listeners[i].symname.toUpperCase() = options.symname.toUpperCase()){
-					log.debug("This value is already listening");
-					return null;
+				if(this.listeners[i] !== undefined){
+					if(this.listeners[i].symname.toUpperCase() == options.symname.toUpperCase()){
+						log.debug("This value is already listening");
+						return null;
+					}
 				}
 		}
 		else if(options.indexGroup !== undefined && options.indexGroup !== undefined ){
-				if(this.listeners[i].symname.toUpperCase() = options.symname.toUpperCase()){
+			if(this.listeners[i] !== undefined){
+				if(this.listeners[i].symname.toUpperCase() == options.symname.toUpperCase()){
 					log.debug("This value is already listening");
 					return null;
 				}		
+			}
 		}
 	}
 	var h = {
@@ -432,7 +438,7 @@ Client.prototype.unsubscribe = function (){
 
 	var client = this;
 	// add  callback to the listener
-	this.once('deleteNotifResponse',function(response){
+	this.on('deleteNotifResponse',function(response){
 		if( response.amsHeader.invokeId  == h.invokeID) {
 			cb(response);
 			// Remove the notification handle with info to the table
@@ -582,7 +588,6 @@ Client.prototype.getSymHandleByName = function (symname,cb){
 ******************************************************************************************************************/
 Client.prototype.onConnect = function (){
 	log.info('The connection is now open');
-	this.emit('connect');
 	return true;
 };
 
@@ -713,6 +718,7 @@ Client.prototype.onData = function (data){
     		break;
 
     	case CMD_ID.NOTIFICATION :
+    		log.debug("Notification received");
     		response.data = {
      			length: dataFrame.readUInt32LE(0),
     			stampsSize: dataFrame.readUInt32LE(4),   			
@@ -743,7 +749,6 @@ Client.prototype.onData = function (data){
 		    		readedByte += response.data.stamps[i].samples[j].sampleLength; 
 		    		// Get information from the notification handle
 		    		var h = this.client.listeners[response.data.stamps[i].samples[j].notifHandle];
-		   			log.debug("Notif Handler",response.data.stamps[i].samples[j]);
 		   			if(h !== undefined){
 			    		var m = {
 			    			tcpHeader: response.tcpHeader,
@@ -753,9 +758,11 @@ Client.prototype.onData = function (data){
 				    			indexGroup: h.indexGroup,
 				    			indexOffset: h.indexOffset,
 				    			symname: h.symname,
-				    			value: response.data.stamps[i].samples[j].value
+				    			value: response.data.stamps[i].samples[j].value,
+				    			timestamp: response.data.stamps[i].timeStamp 
 			    			}
 			    		};
+			    		log.debug("value change",m);
 			    		this.client.emit('valueChange',m);
 			    	}
     			}
@@ -920,9 +927,9 @@ Client.prototype.genDataFrame = function (h){
 			// Write data into the buffer
 	    	switch(h.bytelength) {
 		        case 1: 	dataFrame.writeUInt8(h.value, 12); 										break;
-		        case 2: 	dataFrame.writeUInt16(h.value, 12); 									break;
-		        case 4: 	dataFrame.writeUInt32(h.value, 12);										break;
-		        case 8: 	dataFrame.writeUInt64(h.value, 12);  									break;
+		        case 2: 	dataFrame.writeUInt16LE(h.value, 12); 									break;
+		        case 4: 	dataFrame.writeUInt32LE(h.value, 12);										break;
+		        case 8: 	dataFrame.writeDoubleLE(h.value, 12);  									break;
 		        default: 	dataFrame.write(h.value + "\0", 12, h.value.length, "utf8");  			break;
 	    	}
 			break;
@@ -966,9 +973,9 @@ Client.prototype.genDataFrame = function (h){
 			dataFrame.writeUInt32LE(h.writeLength,12);
 	    	switch(h.bytelength) {
 		        case 1: 	dataFrame.writeUInt8(h.value, 16); 										break;
-		        case 2: 	dataFrame.writeUInt16(h.value, 16); 									break;
-		        case 4: 	dataFrame.writeUInt32(h.value, 16);										break;
-		        case 8: 	dataFrame.writeUInt64(h.value, 16);  									break;
+		        case 2: 	dataFrame.writeUInt16LE(h.value, 16); 									break;
+		        case 4: 	dataFrame.writeUInt32LE(h.value, 16);										break;
+		        case 8: 	dataFrame.writeDouble(h.value, 16);  									break;
 		        default: 	dataFrame.write(h.value + "\0", 16, h.value.length, "utf8");  			break;
 	    	}	
 			break; 
@@ -1078,7 +1085,8 @@ const ADS_TYPE = {
     TIME_OF_DAY		: 4,
     DATE 			: 4,
     DATE_AND_TIME	: 4,
-    STRING			: 81
+    INT16           : 2,
+    STRING			: 35      // TODO FIND A SOLUTION FOR VARIABLE STRING
 }
 
 
