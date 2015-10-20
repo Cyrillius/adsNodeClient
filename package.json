@@ -1,15 +1,20 @@
 {
   "name": "ads-node-client",
-  "version": "0.0.1",
+  "version": "0.0.3",
   "description": "ADS TWINCAT client for Node.js",
   "main": "adsNodeClient.js",
   "directories": {
     "test": "test"
   },
   "dependencies": {
-    "bunyan": "^1.5.1"
+    "debug": "^2.2.0"
   },
-  "devDependencies": {},
+  "devDependencies": {
+    "jasmine": "^2.3.2"
+  },
+  "browserify-shim": {
+    "external": "global:External"
+  },
   "scripts": {
     "test": "node test/test.js | bunyan -o short"
   },

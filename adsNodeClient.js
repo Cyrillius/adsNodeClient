@@ -28,90 +28,84 @@
 var util = require('util');
 var Emitter = require('events').EventEmitter;
 var buf = require('buffer');
-var bunyan = require('bunyan');
+var log = {
+	info: require('debug')('adsNodeClient:info'),
+	debug: null
+};
 var net = require('net');
+var adsProtocol = require('./adsProtocol')
 
-// Log Manager
-var log = null;
 
 /******************************************************************************************************************
 * Client Class
 *******************************************************************************************************************/
-var Client = function(options){
+var AdsClient = function(options){
 
-	// Attributes
-	this.host = 	options.host || '127.0.0.1';
-	this.port =  options.port || 48898;
-	this.amsTargetNetID = options.amsTargetNetID || '0.0.0.0.0.0';
-	this.amsSourceNetID = options.amsSourceNetID || '0.0.0.0.0.0';
-	this.amsPortSource = options.amsPortSource || 32905; 
-	this.amsPortTarget = options.amsPortTarget || 801;
-	this.keepAlive = options.keepAlive || false;
-	this.autoConnect = options.autoConnect || false;
-	this.verbose = options.verbose || false;
-	this.socket = null;
-	this.symbols = [];
-	this.listeners = [];
-	this.pendingTrans = new Buffer(200);
-	console.log(options);
+	// default attributes
+	this.host = 			'127.0.0.1';
+	this.port = 			48898;
+	this.amsTargetNetID = 	'0.0.0.0.0.0';
+	this.amsSourceNetID = 	'0.0.0.0.0.0';
+	this.amsPortSource = 	32905; 
+	this.amsPortTarget = 	801;
+	this.keepAlive = 		false;
+	this.autoConnect = 		false;
+	this.verbose = 			false;
+	this.socket = 			null;
+	this.symbols = 			[];
+	this.listeners = 		[];
+	this.pendingTrans = 	[];
+	this.maxPendingTrans = 	20;
 
-	//Initialize the log manager
-	log = bunyan.createLogger({
-		name: 'adsNodeCLient',
-		streams: [
-			{
-				level: this.verbose ? 'debug' : 'info',
-			    stream: process.stdout            // log to stdout
-			},
-			{
-			    level: 'error',
-			    path: 'log.txt'  // log to a file
-			}
-		]
-	});
-	// When there is an error throw the error and quit
-	log.on('error', function (err, stream) {
-    	throw new Error(err);
-	});
+	// instancied attributes
+	if(options !== undefined){
+		if(options.host !== undefined) 				this.host =  options.host;
+		if(options.port !== undefined) 				this.port =  options.port;
+		if(options.amsTargetNetID !== undefined)	this.amsTargetNetID =  options.amsTargetNetID;
+		if(options.amsSourceNetID !== undefined)	this.amsSourceNetID =  options.amsSourceNetID;
+		if(options.amsPortSource !== undefined) 	this.amsPortSource =  options.amsPortSource;
+		if(options.amsPortTarget !== undefined) 	this.amsPortTarget =  options.amsPortTarget;
+		if(options.keepAlive !== undefined) 		this.keepAlive =  options.keepAlive;
+		if(options.autoConnect !== undefined) 		this.autoConnect =  options.autoConnect;
+		if(options.verbose !== undefined) 			this.verbose =  options.verbose;	
+	}
 
 	// Format ams net id to be used by a buffer
     this.amsTargetNetID = this.amsTargetNetID.split('.');
     for (var i=0; i<this.amsTargetNetID.length;i++)
     {
         this.amsTargetNetID[i] = parseInt(this.amsTargetNetID[i], 10);
-    }
-    if(this.amsTargetNetID.length != 6) log.error('Incorrect amsTargetNetID length');
+    }   
+    if(this.amsTargetNetID.length != 6) throw new Error('Incorrect amsTargetNetID length');
+
   	this.amsSourceNetID = this.amsSourceNetID.split('.');
     for (var i=0; i<this.amsSourceNetID.length;i++)
     {
         this.amsSourceNetID[i] = parseInt(this.amsSourceNetID[i], 10);
     }
-    if(this.amsSourceNetID.length != 6) log.error('Incorrect amsSourceNetID length');
-
-	// Say that there is no pending transaction
-	for(var i=0; i<this.pendingTrans.length;i++)
-		this.pendingTrans[i]=false;
-
-	this.pendingTrans[0]=true;
+    if(this.amsSourceNetID.length != 6) throw new Error('Incorrect amsSourceNetID length');
 
 	// Initialize Event Emitter
 	Emitter.call(this);
-	this.setMaxListeners(100);
+	this.setMaxListeners(30);
 
 	// If autoconnect try to connect now 
-	if (options.host !== null) this.open();
+	if (this.autoConnect == true) this.open();
+
+	// If verbose create debug
+	if (this.verbose == true) log.debug = require('debug')('adsNodeClient:debug');
 };
 
 
 // Inherits from Event Emitter. 
-util.inherits(Client, Emitter);
+util.inherits(AdsClient, Emitter);
 
 /******************************************************************************************************************
 * Open the socket and bind socket events
 * 
 * @return Socket the socket used for the communciation
 *******************************************************************************************************************/
-Client.prototype.open = function (){
+AdsClient.prototype.open = function (){
 
 	this.socket = net.connect(
         this.port,
@@ -159,8 +153,10 @@ Client.prototype.open = function (){
 
 /******************************************************************************************************************
 * Close the socket and remove event listener
+*
+* @return Boolean true
 *******************************************************************************************************************/
-Client.prototype.close = function (){
+AdsClient.prototype.close = function (){
 
 	//remove listeners
     this.socket.removeListener('connect', this.onConnect);
@@ -173,18 +169,22 @@ Client.prototype.close = function (){
     this.releaseSymHandles();
     this.socket.end();
 
+    return true;
 };
 
 /******************************************************************************************************************
 * Read device information	
+* 
+* @param cb Function callback executed when the answer is received
+* @return INT the id of the transaction
 *******************************************************************************************************************/
-Client.prototype.readDeviceInfo = function (cb){
+AdsClient.prototype.readDeviceInfo = function (cb){
 	log.info("read device info");
 	var h = {
-		invokeID: this.getInvokeID(),
-		commandID: CMD_ID.READ_DEVICE_INFO		
+		commandID: adsProtocol.cmd_id["READ_DEVICE_INFO"]		
 	}
 
+	h.invokeID = this.regTransaction(h);
 	var data =  this.genDataFrame(h);
 	var frame = this.genTcpFrame(h, data); 
 
@@ -194,7 +194,7 @@ Client.prototype.readDeviceInfo = function (cb){
 		if( response.amsHeader.invokeId  == h.invokeID){ 
 			if(cb !== undefined) cb(data);
 			// We can release the invoke Id for another transaction
-			client.pendingTrans[h.invokeID]=false;
+			client.pendingTrans[h.invokeID]=null;
 		}
 	});
 
@@ -207,14 +207,17 @@ Client.prototype.readDeviceInfo = function (cb){
 
 /******************************************************************************************************************
 * Read device information	
+*
+* @param cb Function callabck executed when the answer is received
+* @return INT the id of the transaction
 *******************************************************************************************************************/
-Client.prototype.readState = function (cb){
+AdsClient.prototype.readState = function (cb){
 	log.info("read state");
 	var h = {
-		invokeID: this.getInvokeID(),
-		commandID: CMD_ID.READ_STATE	
-	}
+		commandID: adsProtocol.cmd_id["READ_STATE"]		
+	};
 
+	h.invokeID = this.regTransaction(h);
 	var data =  this.genDataFrame(h);
 	var frame = this.genTcpFrame(h, data); 
 
@@ -226,7 +229,7 @@ Client.prototype.readState = function (cb){
 			client.adsState = response.data.adsState;
 			client.deviceState = response.data.deviceState;
 			// We can release the invoke Id for another transaction
-			client.pendingTrans[h.invokeID]=false;
+			client.pendingTrans[h.invokeID]=null;
 		}
 	});
 
@@ -241,17 +244,19 @@ Client.prototype.readState = function (cb){
 /******************************************************************************************************************
 *	ADS read command
 *******************************************************************************************************************/
-Client.prototype.receive =
-Client.prototype.read = function (options,cb){
+AdsClient.prototype.receive =
+AdsClient.prototype.read = function (options,cb){
 	log.info("read value");
 	var h ={
 		indexGroup: options.indexGroup,
 		indexOffset: options.indexOffset,
 		symname: options.symname,
-		invokeID: this.getInvokeID(),
-		commandID: CMD_ID.WRITE
+		commandID: adsProtocol.cmd_id["WRITE"]	
 	}; 
+
 	h =  this.checkIndex(h);
+
+	h.invokeID = this.regTransaction(h);
 	var data = this.genDataFrame(h);
 	var frame = this.genTcpFrame(h, data); 
 
@@ -261,7 +266,7 @@ Client.prototype.read = function (options,cb){
 		if( response.amsHeader.invokeId  == h.invokeID) {
 			if(cb !== undefined) cb(response);
 			// We can release the invoke Id for another transaction
-			client.pendingTrans[h.invokeID]=false;
+			client.pendingTrans[h.invokeID]=null;
 		}
 	});
 
@@ -274,19 +279,19 @@ Client.prototype.read = function (options,cb){
 /******************************************************************************************************************
 *	ADS write command
 *******************************************************************************************************************/
-Client.prototype.send =
-Client.prototype.write = function(options,cb){
+AdsClient.prototype.send =
+AdsClient.prototype.write = function(options,cb){
 	log.info("write value");
 	var h ={
 		indexGroup: options.indexGroup,
 		indexOffset: options.indexOffset,
 		symname: options.symname,
-		invokeID: this.getInvokeID(),
-		commandID: CMD_ID.WRITE,
+		commandID: adsProtocol.cmd_id["WRITE"],
 		value: options.value
 	}; 
 	h =  this.checkIndex(h);
-	console.log(h);
+
+	h.invokeID = this.regTransaction(h);
 	var data = this.genDataFrame(h);
 	var frame = this.genTcpFrame(h, data); 
 
@@ -296,7 +301,7 @@ Client.prototype.write = function(options,cb){
 		if( response.amsHeader.invokeId  == h.invokeID) {
 			if(cb !== undefined) cb(response);
 			// We can release the invoke Id for another transaction
-			client.pendingTrans[h.invokeID]=false;			
+			client.pendingTrans[h.invokeID]=null;			
 		}
 	});
 
@@ -309,8 +314,8 @@ Client.prototype.write = function(options,cb){
 /******************************************************************************************************************
 *	ADS sumup read command
 *******************************************************************************************************************/
-Client.prototype.multiReceive =
-Client.prototype.multiRead = function (options,cb){
+AdsClient.prototype.multiReceive =
+AdsClient.prototype.multiRead = function (options,cb){
 	log.info("read multiple value");
 	log.info("This function is not yet implemented, sorry");
 
@@ -319,8 +324,8 @@ Client.prototype.multiRead = function (options,cb){
 /******************************************************************************************************************
 *	ADS sumup write command
 *******************************************************************************************************************/
-Client.prototype.multiSend =
-Client.prototype.multiWrite = function(){
+AdsClient.prototype.multiSend =
+AdsClient.prototype.multiWrite = function(){
 	log.info("write multiple value");
 	log.info("This function is not yet implemented, sorry");
 };
@@ -328,7 +333,7 @@ Client.prototype.multiWrite = function(){
 /******************************************************************************************************************
 *	ADS add device notification
 *******************************************************************************************************************/
-Client.prototype.subscribe = function (options, cb){
+AdsClient.prototype.subscribe = function (options, cb){
 	log.info("start listening a value");
 	// check if there is already a notifHandle for the value
 	for(var i=0; i<this.listeners.length; i++){
@@ -353,12 +358,13 @@ Client.prototype.subscribe = function (options, cb){
 		indexGroup: options.indexGroup,
 		indexOffset: options.indexOffset,
 		symname: options.symname,
-		invokeID: this.getInvokeID(),
-		commandID: CMD_ID.ADD_NOTIFICATION,
-		transmissionMode:  options.transmissionMode || NOTIFY_TYPE.ONCHANGE,
+		type:options.type,
+		commandID: adsProtocol.cmd_id["ADD_NOTIFICATION"],
+		transmissionMode:  options.transmissionMode || adsProtocol.notify["ONCHANGE"],
 		maxDelay: options.maxDelay || 0,
 		cycleTime: options.cycleTime || 10
 	};
+	log.debug("BOUH",h);
 	var client = this;
 
 	// Check if the symbol exist and add informations
@@ -369,13 +375,13 @@ Client.prototype.subscribe = function (options, cb){
 			hp = {
 				indexGroup: 0xF005,
 				indexOffset: symHandle,
-				invokeID: client.getInvokeID(),
-				commandID: CMD_ID.ADD_NOTIFICATION,
-				transmissionMode:  options.transmissionMode || NOTIFY_TYPE.ONCHANGE,
-				bytelength: options.bytelength,
+				commandID: adsProtocol.cmd_id["ADD_NOTIFICATION"],
+				transmissionMode:  options.transmissionMode || adsProtocol.notify["ONCHANGE"],
+				type: options.type,
 				maxDelay: options.maxDelay || 0,
 				cycleTime: options.cycleTime || 10
 			};
+			hp.invokeID = client.regTransaction(hp);
 			var data = client.genDataFrame(hp);
 			var frame = client.genTcpFrame(hp, data); 
 
@@ -387,7 +393,7 @@ Client.prototype.subscribe = function (options, cb){
 					// Add the notification handle with info to the table
 					client.listeners[response.data.notifHandle] = h;
 					// We can release the invoke Id for another transaction
-					client.pendingTrans[h.invokeID]=false;	
+					client.pendingTrans[h.invokeID]=null;	
 					log.debug("Notification Handler received",response.data.notifHandle);	
 				}
 			});
@@ -398,6 +404,7 @@ Client.prototype.subscribe = function (options, cb){
 		return null
 	}
 	else{
+		h.invokeID = this.regTransaction(h);
 		var data = this.genDataFrame(h);
 		var frame = this.genTcpFrame(h, data); 
 
@@ -408,7 +415,7 @@ Client.prototype.subscribe = function (options, cb){
 				// Add the notification handle with info to the table
 				client.listeners[response.data.notifHandle] = h;
 				// We can release the invoke Id for another transaction
-				client.pendingTrans[h.invokeID]=false;	
+				client.pendingTrans[h.invokeID]=null;	
 				log.debug("Notification Handler received",response.data.notifHandle);	
 			}
 		});
@@ -423,16 +430,17 @@ Client.prototype.subscribe = function (options, cb){
 /******************************************************************************************************************
 *	ADS delete device notification
 *******************************************************************************************************************/
-Client.prototype.unsubscribe = function (){
+AdsClient.prototype.unsubscribe = function (){
 	log.info("stop listening a value");
 	var h = {
 		indexGroup: options.indexGroup,
 		indexOffset: options.indexOffset,
 		symname: options.symname,
-		invokeID: this.getInvokeID(),
-		commandID: CMD_ID.DEL_NOTIFICATION
+		commandID: adsProtocol.cmd_id["DEL_NOTIFICATION"]
 	} 
 	h =  this.checkIndex(h);
+
+	h.invokeID = this.regTransaction(h);
 	var data = this.genDataFrame(h);
 	var frame = this.genTcpFrame(h, data); 
 
@@ -444,7 +452,7 @@ Client.prototype.unsubscribe = function (){
 			// Remove the notification handle with info to the table
 			client.listeners.splice(response.data.notifHandle,1);	
 			// We can release the invoke Id for another transaction
-			client.pendingTrans[h.invokeID]=false;			
+			client.pendingTrans[h.invokeID]=null;			
 		}
 	});
 
@@ -458,16 +466,17 @@ Client.prototype.unsubscribe = function (){
 /******************************************************************************************************************
 *	ADS get uploaded symbols command
 *******************************************************************************************************************/
-Client.prototype.getSymbols = function (length,cb){
+AdsClient.prototype.getSymbols = function (length,cb){
 	log.info("Get symbol list");
 	var h = {
-		invokeID: this.getInvokeID(),
-		commandID: CMD_ID.READ,
+		commandID: adsProtocol.cmd_id["READ"],
         indexGroup: 0x0000F00B,
         indexOffset: 0x00000000,
         bytelength: length,
+        type: "BUFFER"
 	};
 
+	h.invokeID = this.regTransaction(h);
 	var data = this.genDataFrame(h);
 	var frame = this.genTcpFrame(h, data); 
 
@@ -520,16 +529,18 @@ Client.prototype.getSymbols = function (length,cb){
 /******************************************************************************************************************
 *	ADS get symbols size command
 *******************************************************************************************************************/
-Client.prototype.getSymbolsSize = function (cb){
+AdsClient.prototype.getSymbolsSize = function (cb){
 	log.info("Get symbol list size");
 	var h = {
-		invokeID: this.getInvokeID(),
-		commandID: CMD_ID.READ,
+		commandID: adsProtocol.cmd_id["READ"],
         indexGroup: 0x0000F00F,
         indexOffset: 0x00000000,
         bytelength: 0x30,
+        type:"BUFFER"
 	};
+	h =  this.checkIndex(h);
 
+	h.invokeID = this.regTransaction(h);
 	var data = this.genDataFrame(h);
 	var frame = this.genTcpFrame(h, data); 
 
@@ -538,7 +549,7 @@ Client.prototype.getSymbolsSize = function (cb){
 		var length = response.data.value.readInt32LE(4);
 		if( response.amsHeader.invokeId == h.invokeID){ 
 				cb(length);
-				this.pendingTrans[h.invokeID] = false;
+				this.pendingTrans[h.invokeID] = null;
 		}
 	});
 
@@ -552,18 +563,20 @@ Client.prototype.getSymbolsSize = function (cb){
 /******************************************************************************************************************
 *  ADS get symbol handle by name
 *******************************************************************************************************************/
-Client.prototype.getSymHandleByName = function (symname,cb){
+AdsClient.prototype.getSymHandleByName = function (symname,cb){
 	log.info("Get handle by symbol name");
     var h = {
-    	invokeID: this.getInvokeID(),
         indexGroup: 0x0000F003,
         indexOffset: 0x00000000,
         readLength: 4,
         value: symname,
         writeLength: symname.length,
-        commandID: CMD_ID.READ_WRITE,
+        commandID: adsProtocol.cmd_id["READ_WRITE"],
+        writeType: "BUFFER",
+        type: "DWORD"
     };
 
+    h.invokeID = this.regTransaction(h);
 	var data = this.genDataFrame(h);
 	var frame = this.genTcpFrame(h, data);     
 
@@ -572,7 +585,7 @@ Client.prototype.getSymHandleByName = function (symname,cb){
 		if( response.amsHeader.invokeId == h.invokeID){ 
 			var symhandle = response.data.value;
 			cb(symhandle);
-			this.pendingTrans[h.invokeID] = false;
+			this.pendingTrans[h.invokeID] = null;
 		}
 	});
 
@@ -586,7 +599,7 @@ Client.prototype.getSymHandleByName = function (symname,cb){
 /******************************************************************************************************************
 * ON CONNECT EVENT
 ******************************************************************************************************************/
-Client.prototype.onConnect = function (){
+AdsClient.prototype.onConnect = function (){
 	log.info('The connection is now open');
 	return true;
 };
@@ -594,7 +607,7 @@ Client.prototype.onConnect = function (){
 /******************************************************************************************************************
 * ON  DATA EVENT
 ******************************************************************************************************************/
-Client.prototype.onData = function (data){
+AdsClient.prototype.onData = function (data){
 	log.debug('Some data has been received', data);
 	//Get data
 	if (this.dataStream === null) {
@@ -603,7 +616,7 @@ Client.prototype.onData = function (data){
         this.dataStream = Buffer.concat([this.dataStream, data]);
     }
     //Check if we have received all the header data   
-    var headerSize = FRAME_SIZE.TCP_HEAD + FRAME_SIZE.AMS_HEAD;
+    var headerSize = adsProtocol.frames["TCP_HEAD"].size  + adsProtocol.frames["AMS_HEAD"].size ;
     if (this.dataStream.length < headerSize) {
     	log.debug("The reception of the header is not complete")
     	return false;    
@@ -623,13 +636,13 @@ Client.prototype.onData = function (data){
 
 	var response = {}
 	// Parse data from TCP Header
-	var tcpHeader = this.dataStream.slice(0,FRAME_SIZE.TCP_HEAD);
+	var tcpHeader = this.dataStream.slice(0,adsProtocol.frames["TCP_HEAD"].size );
 	response.tcpHeader = {
 		reserved: tcpHeader.readUInt16LE(0),
 		length: tcpHeader.readUInt32LE(2)
 	}
 	// Parse data from AMS Header
-	var amsHeader = this.dataStream.slice(FRAME_SIZE.TCP_HEAD,FRAME_SIZE.TCP_HEAD + FRAME_SIZE.AMS_HEAD);
+	var amsHeader = this.dataStream.slice(adsProtocol.frames["TCP_HEAD"].size ,adsProtocol.frames["TCP_HEAD"].size  + adsProtocol.frames["AMS_HEAD"].size );
 	response.amsHeader = {
 		amsTargetNetID: [amsHeader[0], amsHeader[1], amsHeader[2], amsHeader[3], amsHeader[4], amsHeader[5]],
 		amsPortTarget: amsHeader.readUInt16LE(6),
@@ -642,10 +655,10 @@ Client.prototype.onData = function (data){
 		invokeId: amsHeader.readUInt32LE(28)
 	}
 	// Parse data from Data Frame
-	var dataFrame = this.dataStream.slice(FRAME_SIZE.TCP_HEAD + FRAME_SIZE.AMS_HEAD);
+	var dataFrame = this.dataStream.slice(	adsProtocol.frames["TCP_HEAD"].size  + adsProtocol.frames["AMS_HEAD"].size );
 	response.data={};
     switch (response.amsHeader.commandID) {
-    	case CMD_ID.READ_DEVICE_INFO:
+    	case adsProtocol.cmd_id["READ_DEVICE_INFO"]:
     		response.data = {
     			result: dataFrame.readUInt32LE(0),
     			majorVersion: dataFrame[4],
@@ -656,51 +669,74 @@ Client.prototype.onData = function (data){
     		this.client.emit('deviceInfoResponse',response);
 
     		break;
-    	case CMD_ID.READ_WRITE :
+    	case adsProtocol.cmd_id["READ_WRITE"] :
     		response.data = {
     			result: dataFrame.readUInt32LE(0),
     			length: dataFrame.readUInt32LE(4),
     		};
-    		switch (response.data.length) {
-    			case 1: response.data.value = dataFrame.readUInt8(8); 		break;
-    			case 2: response.data.value = dataFrame.readUInt16LE(8); 	break;
-    			case 4: response.data.value = dataFrame.readUInt32LE(8); 	break;
-    			case 8: response.data.value = dataFrame.readDoubleLE(8); 	break;
+    		var id = response.amsHeader.invokeId;
+    		if (this.client.pendingTrans[id] === undefined || this.client.pendingTrans[id] === null){
+    			log.warn("received a foreign transaction", response);
+    			return false;
+    		}
+    		var type = this.client.pendingTrans[id].handle.type;
+    		switch (adsProtocol.types[type].bufferType) {
+    			case "uint8": 		response.data.value = dataFrame.readUInt8(8); 				break;
+		        case "int8": 		response.data.value = dataFrame.readInt8(8); 				break;
+		        case "uint16LE": 	response.data.value = dataFrame.readUInt16LE(8); 			break;
+		        case "int16LE": 	response.data.value = dataFrame.readInt16LE(8); 			break;
+		        case "uint32LE": 	response.data.value = dataFrame.readUInt32LE(8);			break;
+		        case "int32LE": 	response.data.value = dataFrame.readInt32LE(8);				break;
+		        case "floatLE": 	response.data.value = dataFrame.readFloatLE(8);  			break;
+		        case "doubleLE": 	response.data.value = dataFrame.readDoubleLE(8);  			break;
     			default: response.data.value = dataFrame.slice(8);			break;
     		}
     		this.client.emit('readWriteResponse',response);
     		break;
-    	case CMD_ID.READ :
+    	case adsProtocol.cmd_id["READ"] :
     		response.data = {
     			result: dataFrame.readUInt32LE(0),
     			length: dataFrame.readUInt32LE(4),
     		};
-    		switch (response.data.length) {
-    			case 1: response.data.value = dataFrame.readUInt8(8); 		break;
-    			case 2: response.data.value = dataFrame.readUInt16LE(8); 	break;
-    			case 4: response.data.value = dataFrame.readUInt32LE(8); 	break;
-    			case 8: response.data.value = dataFrame.readDoubleLE(8); 	break;
-    			default: response.data.value = dataFrame.slice(8);			break;
+    		var id = response.amsHeader.invokeId;
+    		if (this.client.pendingTrans[id] === undefined || this.client.pendingTrans[id] === null){
+    			log.warn("received a foreign transaction", response);
+    			return false;
+    		}
+    		var type = this.client.pendingTrans[id].handle.type;
+    		if (type !== undefined){
+    			type = adsProtocol.types[type].bufferType;
+    		}
+    		switch (type) {
+    			case "uint8": 		response.data.value = dataFrame.readUInt8(8); 				break;
+		        case "int8": 		response.data.value = dataFrame.readInt8(8); 				break;
+		        case "uint16LE": 	response.data.value = dataFrame.readUInt16LE(8); 			break;
+		        case "int16LE": 	response.data.value = dataFrame.readInt16LE(8); 			break;
+		        case "uint32LE": 	response.data.value = dataFrame.readUInt32LE(8);			break;
+		        case "int32LE": 	response.data.value = dataFrame.readInt32LE(8);				break;
+		        case "floatLE": 	response.data.value = dataFrame.readFloatLE(8);  			break;
+		        case "doubleLE": 	response.data.value = dataFrame.readDoubleLE(8);  			break;
+    			default: response.data.value = dataFrame.slice(8);								break;
     		}
     		this.client.emit('readResponse',response);
     		break;
 
-    	case CMD_ID.DEL_NOTIFICATION :
+    	case adsProtocol.cmd_id["DEL_NOTIFICATION"] :
     		response.data.result= dataFrame.readUInt32LE(0);
     		this.client.emit('deleteNotifResponse',response);
     		break;
 
-    	case CMD_ID.WRITE_CONTROL :
+    	case adsProtocol.cmd_id["WRITE_CONTROL"] :
     		response.data.result= dataFrame.readUInt32LE(0);
     		this.client.emit('writeControlResponse',response);
     		break;
 
-    	case CMD_ID.WRITE :
+    	case adsProtocol.cmd_id["WRITE"] :
     		response.data.result= dataFrame.readUInt32LE(0);
     		this.client.emit('writeResponse',response);
     		break;
 
-    	case CMD_ID.READ_STATE :
+    	case adsProtocol.cmd_id["READ_STATE"] :
     		response.data = {
     			result: dataFrame.readUInt32LE(0),
     			adsState: dataFrame.readUInt16LE(4),
@@ -709,7 +745,7 @@ Client.prototype.onData = function (data){
     		this.client.emit('readStateResponse',response);
     		break;
 
-    	case CMD_ID.ADD_NOTIFICATION :
+    	case adsProtocol.cmd_id["ADD_NOTIFICATION"] :
     		response.data = {
     			result: dataFrame.readUInt32LE(0),
     			notifHandle: dataFrame.readUInt32LE(4),
@@ -717,7 +753,7 @@ Client.prototype.onData = function (data){
     		this.client.emit('addNotifResponse',response);
     		break;
 
-    	case CMD_ID.NOTIFICATION :
+    	case adsProtocol.cmd_id["NOTIFICATION"] :
     		log.debug("Notification received");
     		response.data = {
      			length: dataFrame.readUInt32LE(0),
@@ -738,18 +774,10 @@ Client.prototype.onData = function (data){
     				response.data.stamps[i].samples[j].notifHandle = stampsFrame.readUInt32LE(readedByte);
     				readedByte += 4; 
     				response.data.stamps[i].samples[j].sampleLength = stampsFrame.readUInt32LE(readedByte);
-    				readedByte += 4; 
-		    		switch (response.data.stamps[i].samples[j].sampleLength) {
-		    			case 1: response.data.stamps[i].samples[j].value = stampsFrame.readUInt8(readedByte); 	break;
-		    			case 2: response.data.stamps[i].samples[j].value = stampsFrame.readUInt16LE(readedByte); 	break;
-		    			case 4: response.data.stamps[i].samples[j].value = stampsFrame.readUInt32LE(readedByte); 	break;
-		    			case 8: response.data.stamps[i].samples[j].value = stampsFrame.readDoubleLE(readedByte); 	break;
-		    			default: response.data.stamps[i].samples[j].value = stampsFrame.slice(readedByte, readedByte + response.data.stamps[i].samples[j].sampleLength);	break;
-		    		}
-		    		readedByte += response.data.stamps[i].samples[j].sampleLength; 
-		    		// Get information from the notification handle
-		    		var h = this.client.listeners[response.data.stamps[i].samples[j].notifHandle];
-		   			if(h !== undefined){
+    				readedByte += 4;
+    				// Get information from the notification handle
+    				var h = this.client.listeners[response.data.stamps[i].samples[j].notifHandle];
+    				if(h !== undefined){
 			    		var m = {
 			    			tcpHeader: response.tcpHeader,
 			    			amsHeader: response.amsHeader,
@@ -758,13 +786,25 @@ Client.prototype.onData = function (data){
 				    			indexGroup: h.indexGroup,
 				    			indexOffset: h.indexOffset,
 				    			symname: h.symname,
-				    			value: response.data.stamps[i].samples[j].value,
 				    			timestamp: response.data.stamps[i].timeStamp 
 			    			}
 			    		};
 			    		log.debug("value change",m);
 			    		this.client.emit('valueChange',m);
+			    	
+			    		switch (adsProtocol.types[h.type].bufferType) {
+			    			case "uint8": 		m.data.value = response.data.stamps[i].samples[j].value = stampsFrame.readUInt8(readedByte); 				break;
+					        case "int8": 		m.data.value = response.data.stamps[i].samples[j].value = stampsFrame.readInt8(readedByte); 				break;
+					        case "uint16LE": 	m.data.value = response.data.stamps[i].samples[j].value = stampsFrame.readUInt16LE(readedByte); 			break;
+					        case "int16LE": 	m.data.value = response.data.stamps[i].samples[j].value = stampsFrame.readInt16LE(readedByte); 			break;
+					        case "uint32LE": 	m.data.value = response.data.stamps[i].samples[j].value = stampsFrame.readUInt32LE(readedByte);			break;
+					        case "int32LE": 	m.data.value = response.data.stamps[i].samples[j].value = stampsFrame.readInt32LE(readedByte);				break;
+					        case "floatLE": 	m.data.value = response.data.stamps[i].samples[j].value = stampsFrame.readFloatLE(readedByte);  			break;
+					        case "doubleLE": 	m.data.value = response.data.stamps[i].samples[j].value = stampsFrame.readDoubleLE(readedByte);  			break;
+			    			default: response.data.stamps[i].samples[j].value = stampsFrame.slice(readedByte, readedByte + response.data.stamps[i].samples[j].sampleLength);	break;
+			    		}
 			    	}
+		    		readedByte += response.data.stamps[i].samples[j].sampleLength;   		
     			}
     		} 	
 
@@ -772,17 +812,17 @@ Client.prototype.onData = function (data){
     		break;    	
 
     	default :
-    		log.error("The commandID received is not handled", response);
+    		throw new Error("The commandID received is not handled", response);
     		return false;
     		break;
     }
 
     if (response.amsHeader.errorId > 0)
-    	log.error(getError(response.amsHeader.errorId),response);
+    	throw new Error(getError(response.amsHeader.errorId),response);
 
     if (response.data.result !== undefined)
 	    if (response.data.result > 0)
-	    	log.error(getError(response.data.result),response);
+	    	throw new Error(getError(response.data.result),response);
 
     log.debug ("parsed response:", response);
     this.client.emit ("receive", response);
@@ -794,7 +834,7 @@ Client.prototype.onData = function (data){
 /******************************************************************************************************************
 * ON END EVENT HANDLE
 ******************************************************************************************************************/
-Client.prototype.onEnd = function (){
+AdsClient.prototype.onEnd = function (){
 	log.info('The other end close the socket');
 	this.emit('end');
 	return true;
@@ -803,7 +843,7 @@ Client.prototype.onEnd = function (){
 /******************************************************************************************************************
 * ON CLOSE EVENT HANDLE
 ******************************************************************************************************************/
-Client.prototype.onClose = function (){
+AdsClient.prototype.onClose = function (){
 	log.info('The socket is closed');
 	this.emit('close');
 	return true;
@@ -812,8 +852,8 @@ Client.prototype.onClose = function (){
 /******************************************************************************************************************
 * ON ERROR EVENT HANDLE
 ******************************************************************************************************************/
-Client.prototype.onError = function (error){
-	log.error('An error has happened \n'+ error);
+AdsClient.prototype.onError = function (error){
+	throw new Error('An error has happened \n'+ error);
 	this.emit('error',error);
 	return true;
 };
@@ -821,7 +861,7 @@ Client.prototype.onError = function (error){
 /******************************************************************************************************************
 * ON TIMEOUT EVENT HANDLE
 ******************************************************************************************************************/
-Client.prototype.onTimeout = function (){
+AdsClient.prototype.onTimeout = function (){
 	log.info('The connection has timed out');
 	this.emit('timeout');
 	return true;
@@ -830,21 +870,22 @@ Client.prototype.onTimeout = function (){
 /******************************************************************************************************************
 * Get invoke id
 ******************************************************************************************************************/
-Client.prototype.getInvokeID = function (){	
-	log.debug("Transaction in progress",this.pendingTrans);
+AdsClient.prototype.regTransaction = function (h){	
 	var enoughPlace = false;
 	var id = null;	
-	for (var i = 0; i< this.pendingTrans.length; i++){
-		if(this.pendingTrans[i] == false && enoughPlace == false){
+	for (var i = 0; i< this.maxPendingTrans; i++){
+		if((this.pendingTrans[i] === undefined || this.pendingTrans[i] === null) && enoughPlace == false){
 			id = i;
 			enoughPlace = true;
-			this.pendingTrans[i] = true;
+
+			this.pendingTrans[i] = { handle: h };
 		}
 	}
 
 	if (!enoughPlace){
-		log.error('There is to much pending transaction')
+		throw new Error('There is to much pending transaction')
 	}
+	log.debug("Transaction in progress",this.pendingTrans);
 	log.debug("Current Transaction id",id);
 
 	return id;
@@ -853,7 +894,7 @@ Client.prototype.getInvokeID = function (){
 /******************************************************************************************************************
 * Check Index
 ******************************************************************************************************************/
-Client.prototype.checkIndex = function(o){
+AdsClient.prototype.checkIndex = function(o){
 	// If we want to work with symbol name
 	if(o.indexGroup === undefined && o.indexOffset === undefined && o.symname !== undefined){
 		var symname = o.symname.toUpperCase();
@@ -866,7 +907,8 @@ Client.prototype.checkIndex = function(o){
 		if(index !== null){
 			o.indexGroup = this.symbols[index].indexGroup;
 			o.indexOffset = this.symbols[index].indexOffset;
-			o.bytelength = ADS_TYPE[this.symbols[index].type];
+			o.bytelength = adsProtocol.types[this.symbols[index].type].bytelength;
+			o.type = this.symbols[index].type
 		}
 		// Else we throw an error
 		else{
@@ -883,16 +925,25 @@ Client.prototype.checkIndex = function(o){
 		// If we find something we can set the handle
 		if(index !== null){
 			o.symname = this.symbols[index].name;
-			if (o.bytelength === undefined) o.bytelength = ADS_TYPE[this.symbols[index].type];
+			if (o.bytelength === undefined){
+				o.bytelength = adsProtocol.types[this.symbols[index].type].bytelength;
+				o.type = this.symbols[index].type
+			} 
 		}
 		// Else try to send
 		else{
 			log.debug("The symbol doesn't exist Try to send",o);
+			switch (o.bytelength){
+    			case 1: o.type= "BOOL"; 	 	break;
+    			case 2: o.type= "UINT"; 		break;
+    			case 4: o.type= "REAL"; 		break;
+    			case 8: o.type= "LREAL"; 		break;
+			}
 		}
 	}
 	else {
 		//Error there is not enough information
-		log.error("There is not enough information to send something",o);
+		throw new Error("There is not enough information to send something",o);
 	}
 
 	return o;
@@ -902,44 +953,56 @@ Client.prototype.checkIndex = function(o){
 /******************************************************************************************************************
 * Generate Data Frame
 ******************************************************************************************************************/
-Client.prototype.genDataFrame = function (h){
+AdsClient.prototype.genDataFrame = function (h){
 	// Start to generate the frame
 	var dataFrame;
-	var dataSize = h.bytelength || 0;
+
+	var dataSize = h.bytelength;
 
 	switch (h.commandID){
-		case CMD_ID.READ_DEVICE_INFO :
+		case adsProtocol.cmd_id["READ_DEVICE_INFO"] :
 			dataFrame = new Buffer(0);
 			break; 
 
-		case CMD_ID.READ :
-			dataFrame = new Buffer(FRAME_SIZE.INDEX_GRP + FRAME_SIZE.INDEX_OFFSET + FRAME_SIZE.LENGTH);
+		case adsProtocol.cmd_id["READ"] :
+			dataFrame = new Buffer(	adsProtocol.frames["INDEX_GRP"].size + 
+									adsProtocol.frames["INDEX_OFFSET"].size  + 
+									adsProtocol.frames["LENGTH"].size);
 			dataFrame.writeUInt32LE(h.indexGroup,0);
 			dataFrame.writeUInt32LE(h.indexOffset,4);
 			dataFrame.writeUInt32LE(h.bytelength,8);
 			break;
 
-		case CMD_ID.WRITE :
-			dataFrame = new Buffer(FRAME_SIZE.INDEX_GRP + FRAME_SIZE.INDEX_OFFSET + FRAME_SIZE.LENGTH + dataSize);
+		case adsProtocol.cmd_id["WRITE"] :
+			dataFrame = new Buffer(	adsProtocol.frames["INDEX_GRP"].size  + 
+									adsProtocol.frames["INDEX_OFFSET"].size  + 
+									adsProtocol.frames["LENGTH"].size  + 
+									dataSize);
 			dataFrame.writeUInt32LE(h.indexGroup,0);
 			dataFrame.writeUInt32LE(h.indexOffset,4);
 			dataFrame.writeUInt32LE(h.bytelength,8);
 			// Write data into the buffer
-	    	switch(h.bytelength) {
-		        case 1: 	dataFrame.writeUInt8(h.value, 12); 										break;
-		        case 2: 	dataFrame.writeUInt16LE(h.value, 12); 									break;
-		        case 4: 	dataFrame.writeUInt32LE(h.value, 12);										break;
-		        case 8: 	dataFrame.writeDoubleLE(h.value, 12);  									break;
+	    	switch(adsProtocol.types[h.type].bufferType) {
+		        case "uint8": 	dataFrame.writeUInt8(h.value, 12); 										break;
+		        case "int8": 		dataFrame.writeInt8(h.value, 12); 										break;
+		        case "uint16LE": 	dataFrame.writeUInt16LE(h.value, 12); 									break;
+		        case "int16LE": 	dataFrame.writeInt16LE(h.value, 12); 									break;
+		        case "uint32LE": 	dataFrame.writeUInt32LE(h.value, 12);									break;
+		        case "int32LE": 	dataFrame.writeInt32LE(h.value, 12);									break;
+		        case "floatLE": 	dataFrame.writeFloatLE(h.value, 12);  									break;
+		        case "doubleLE": 	dataFrame.writeFloatLE(h.value, 12);  									break;
 		        default: 	dataFrame.write(h.value + "\0", 12, h.value.length, "utf8");  			break;
 	    	}
 			break;
 
-		case CMD_ID.READ_STATE :
+		case adsProtocol.cmd_id["READ_STATE"] :
 			dataFrame = new Buffer(0);			
 			break; 
 
-		case CMD_ID.WRITE_CONTROL :
-			dataFrame = new Buffer(FRAME_SIZE.ADS_STATE + FRAME_SIZE.DEVICE_STATE + FRAME_SIZE.LENGTH);
+		case adsProtocol.cmd_id["WRITE_CONTROL"] :
+			dataFrame = new Buffer(	adsProtocol.frames["ADS_STATE"].size +
+									adsProtocol.frames["DEVICE_STATE"].size  + 
+									adsProtocol.frames["LENGTH"].size );
 			dataFrame.writeUInt16LE(h.adsState,0);
 			dataFrame.writeUInt16LE(h.deviceState,2);
 			// We can send data to add further information I just need to start or stop the PLC
@@ -947,11 +1010,17 @@ Client.prototype.genDataFrame = function (h){
 			dataFrame.writeUInt32LE(0x0000,4);	
 			break; 
 
-		case CMD_ID.ADD_NOTIFICATION :
-			dataFrame = new Buffer(FRAME_SIZE.INDEX_GRP + FRAME_SIZE.INDEX_OFFSET + FRAME_SIZE.LENGTH + FRAME_SIZE.TRANSMOD + FRAME_SIZE.MAX_DELAY + FRAME_SIZE.CYCLE_TIME + FRAME_SIZE.NOTIF_RESERVED);
+		case adsProtocol.cmd_id["ADD_NOTIFICATION"] :
+			dataFrame = new Buffer(	adsProtocol.frames["INDEX_GRP"].size  + 
+									adsProtocol.frames["INDEX_OFFSET"].size  + 
+									adsProtocol.frames["LENGTH"].size  + 
+									adsProtocol.frames["TRANSMOD"].size  + 
+									adsProtocol.frames["MAX_DELAY"].size  + 
+									adsProtocol.frames["CYCLE_TIME"].size  + 
+									adsProtocol.frames["NOTIF_RESERVED"].size );
 			dataFrame.writeUInt32LE(h.indexGroup,0);
 			dataFrame.writeUInt32LE(h.indexOffset,4);
-			dataFrame.writeUInt32LE(h.bytelength,8);
+			dataFrame.writeUInt32LE(adsProtocol.types[h.type].bytelength,8);
 			dataFrame.writeUInt32LE(h.transmissionMode,12);
 			dataFrame.writeUInt32LE(h.maxDelay,16);
 			dataFrame.writeUInt32LE(h.cycleTime,20);	
@@ -959,26 +1028,36 @@ Client.prototype.genDataFrame = function (h){
 			dataFrame.writeDoubleLE(0,32);		
 			break; 
 
-		case CMD_ID.DEL_NOTIFICATION :
-			dataFrame = new Buffer(FRAME_SIZE.NOTIF_HANDLE);
+		case adsProtocol.cmd_id["DEL_NOTIFICATION"] :
+			dataFrame = new Buffer(adsProtocol.frames["NOTIF_HANDLE"].size );
 			dataFrame.writeUInt32LE(h.notifHandle,0);
 			break; 
 
-		case CMD_ID.READ_WRITE :
+		case adsProtocol.cmd_id["READ_WRITE"] :
 			dataSize = h.writeLength;
-			dataFrame = new Buffer(FRAME_SIZE.INDEX_GRP + FRAME_SIZE.INDEX_OFFSET + FRAME_SIZE.LENGTH + FRAME_SIZE.LENGTH + dataSize);
+			dataFrame = new Buffer( adsProtocol.frames["INDEX_GRP"].size  + 
+									adsProtocol.frames["INDEX_OFFSET"].size  + 
+									adsProtocol.frames["LENGTH"].size  + 
+									adsProtocol.frames["LENGTH"].size  + 
+									dataSize);
 			dataFrame.writeUInt32LE(h.indexGroup,0);
 			dataFrame.writeUInt32LE(h.indexOffset,4);
 			dataFrame.writeUInt32LE(h.readLength,8);
 			dataFrame.writeUInt32LE(h.writeLength,12);
-	    	switch(h.bytelength) {
-		        case 1: 	dataFrame.writeUInt8(h.value, 16); 										break;
-		        case 2: 	dataFrame.writeUInt16LE(h.value, 16); 									break;
-		        case 4: 	dataFrame.writeUInt32LE(h.value, 16);										break;
-		        case 8: 	dataFrame.writeDouble(h.value, 16);  									break;
+			// Write data into the buffer
+	    	switch(adsProtocol.types[h.writeType].bufferType) {
+		        case "uint8": 		dataFrame.writeUInt8(h.value, 16); 										break;
+		        case "int8": 		dataFrame.writeInt8(h.value, 16); 										break;
+		        case "uint16LE": 	dataFrame.writeUInt16LE(h.value, 16); 									break;
+		        case "int16LE": 	dataFrame.writeInt16LE(h.value, 16); 									break;
+		        case "uint32LE": 	dataFrame.writeUInt32LE(h.value, 16);									break;
+		        case "int32LE": 	dataFrame.writeInt32LE(h.value, 16);									break;
+		        case "floatLE": 	dataFrame.writeFloatLE(h.value, 16);  									break;
+		        case "doubleLE": 	dataFrame.writeFloatLE(h.value, 16);  									break;
 		        default: 	dataFrame.write(h.value + "\0", 16, h.value.length, "utf8");  			break;
-	    	}	
-			break; 
+	    	}
+			break;
+		
 	}
 
 	return dataFrame;
@@ -987,16 +1066,16 @@ Client.prototype.genDataFrame = function (h){
 /******************************************************************************************************************
 * Generate TCP Frame
 ******************************************************************************************************************/
-Client.prototype.genTcpFrame = function(h,d){
+AdsClient.prototype.genTcpFrame = function(h,d){
 	var   	dataSize 		= d.length;
 
 	// Generate the tcp Header
-	var tcpHeader = new Buffer(FRAME_SIZE.TCP_HEAD);
+	var tcpHeader = new Buffer(adsProtocol.frames["TCP_HEAD"].size );
 	tcpHeader[0] = 0x00;   									// -- 2 reserved Bytes
 	tcpHeader[1] = 0x00;
-	tcpHeader.writeUInt32LE(FRAME_SIZE.AMS_HEAD + dataSize, 2); 	// -- length of the data
+	tcpHeader.writeUInt32LE(adsProtocol.frames["AMS_HEAD"].size   + dataSize, 2); 	// -- length of the data
 	// Generate the AMS Header
-	var amsHeader = new Buffer(FRAME_SIZE.AMS_HEAD);
+	var amsHeader = new Buffer(adsProtocol.frames["AMS_HEAD"].size  );
 	amsHeader[0] = this.amsTargetNetID[0]; 			// -- amsTargetNetID
 	amsHeader[1] = this.amsTargetNetID[1];
 	amsHeader[2] = this.amsTargetNetID[2];
@@ -1018,201 +1097,19 @@ Client.prototype.genTcpFrame = function(h,d){
 	amsHeader.writeUInt32LE(h.invokeID,28);			// -- InvokeID
 
 	// Generate the fram
-	var frame = new Buffer(FRAME_SIZE.TCP_HEAD + FRAME_SIZE.AMS_HEAD + dataSize);
+	var frame = new Buffer(	adsProtocol.frames["TCP_HEAD"].size   + 
+							adsProtocol.frames["AMS_HEAD"].size   + 
+							dataSize);
 	tcpHeader.copy(frame, 0, 0);
-	amsHeader.copy(frame, FRAME_SIZE.TCP_HEAD);
-	d.copy(frame, FRAME_SIZE.TCP_HEAD + FRAME_SIZE.AMS_HEAD);
+	amsHeader.copy(frame, adsProtocol.frames["TCP_HEAD"].size  );
+	d.copy(frame, adsProtocol.frames["TCP_HEAD"].size   + adsProtocol.frames["AMS_HEAD"].size );
 
 	return frame;
 };
 
 /******************************************************************************************************************
-* HELPERS and CONSTANTS
+* HELPERS 
 ******************************************************************************************************************/
-
-/** 
-* FRAME SIZE
-*/
-const FRAME_SIZE = {
-	TCP_HEAD: 6,
-	AMS_HEAD: 32,
-	INDEX_GRP: 4,
-	INDEX_OFFSET: 4,
-	LENGTH: 4,
-	ADS_STATE: 2,
-	DEVICE_STATE: 2,
-	TRANSMOD: 4,
-	MAX_DELAY: 4,
-	CYCLE_TIME: 4,
-	NOTIF_RESERVED: 16,
-	NOTIF_HANDLE: 4	
-}
-
-
-/**
-* COMMAND ID
-*/
-const CMD_ID = {
-	READ_DEVICE_INFO: 1,
-	READ: 2,
-	WRITE: 3,
-	READ_STATE: 4,
-	WRITE_CONTROL: 5,
-	ADD_NOTIFICATION: 6,
-	DEL_NOTIFICATION: 7,
-	NOTIFICATION: 8,
-	READ_WRITE: 9,
-}
-/**
-* ADS TYPE
-*/
-const ADS_TYPE = {
-	BOOL			: 1,
-    BYTE 			: 1,
-    WORD 			: 2,
-    DWORD 			: 4,
-    SINT 			: 1,
-    USINT 			: 1,
-    INT 			: 2,
-    UINT 			: 2,
-    DINT 			: 4,
-    UDINT 			: 4,
-    LINT 			: 8,
-    ULINT 			: 8,
-    REAL 			: 4,
-    LREAL 			: 8,
-    TIME 			: 4,
-    TIME_OF_DAY		: 4,
-    DATE 			: 4,
-    DATE_AND_TIME	: 4,
-    INT16           : 2,
-    STRING			: 35      // TODO FIND A SOLUTION FOR VARIABLE STRING
-}
-
-
-/** 
-* NOTIFY_TYPE
-*/
-const NOTIFY_TYPE = {
-    CYCLIC: 3,
-    ONCHANGE: 4
-};
-
-
-/**
-* ADS STATE
-*/
-const ADS_STATE = { 
-	INVALID     	: 0,
-	IDLE          	: 1,
-	RESET         	: 2,
-	INIT          	: 3,
-	START         	: 4,
-	RUN           	: 5,
-	STOP          	: 6,
-	SAVECFG       	: 7,
-	LOADCFG       	: 8,
-	POWERFAILURE  	: 9,
-	POWERGOOD     	: 10,
-	ERROR         	: 11,
-	SHUTDOWN      	: 12,
-	SUSPEND  		: 13,
-	RESUME        	: 14,
-	CONFIG        	: 15, // system is in config mode
-	RECONFIG      	: 16
-};
-var getAdsState = function (state){
-	var s = "";
-	switch (state){
-		case ADS_STATE.INVALID:
-			s = "Invalid"; 
-			break;
-		case ADS_STATE.IDLE:
-			s = "Idle"; 
-			break;
-		case ADS_STATE.RESET:
-			s = "Reset"; 
-			break;
-		case ADS_STATE.INIT:
-			s = "Init"; 
-			break;
-		case ADS_STATE.START:
-			s = "Start"; 
-		 	break;
-		case ADS_STATE.RUN:
-			s = "Run"; 
-			break;
-		case ADS_STATE.STOP:
-			s = "Stop"; 
-			break;
-		case ADS_STATE.SAVECFG:
-			s = "Save Config"; 
-			break;
-		case ADS_STATE.LOADCFG:
-			s = "Load Config"; 
-			break;
-		case ADS_STATE.POWERFAILURE:
-			s = "Power Failure"; 
-			break;
-		case ADS_STATE.POWERGOOD:
-			s = "Power Good"; 
-			break;
-		case ADS_STATE.ERROR:
-			s = "Error"; 
-			break;
-		case ADS_STATE.SHUTDOWN:
-			s = "Shutdown"; 
-			break;
-		case ADS_STATE.SUSPEND:
-			s = "Suspend"; 
-			break;
-		case ADS_STATE.RESUME:
-			s = "Resume"; 
-			break;
-		case ADS_STATE.CONFIG:
-			s = "Config"; 
-			break;
-		case ADS_STATE.RECONFIG:
-			s = "Reconfig"; 
-			break;
-		default :
-			s = "Unknow";
-			break;
-	}
-	return s;
-}
-
-/**
-*	ADS Services
-*/
-const ADS_SERVICES = {
-	SYMTAB				: 0xF000,
-	SYMNAME				: 0xF001,
-	SYMVAL				: 0xF002,
-	SYM_HNDBYNAME		: 0xF003,
-	SYM_VALBYNAME		: 0xF004,
-	SYM_VALBYHND		: 0xF005,
-	SYM_RELEASEHND		: 0xF006,
-	SYM_INFOBYNAME		: 0xF007,
-	SYM_VERSION			: 0xF008,
-	SYM_INFOBYNAMEEX	: 0xF009,
-	SYM_DOWNLOAD		: 0xF00A,
-	SYM_UPLOAD			: 0xF00B,
-	SYM_UPLOADINFO		: 0xF00C,
-	SYMNOTE				: 0xF010,
-	IOIMAGE_RWIB		: 0xF020,
-	IOIMAGE_RWIX		: 0xF021,
-	IOIMAGE_RISIZE		: 0xF025,
-	IOIMAGE_RWOB		: 0xF030,
-	IOIMAGE_RWOX		: 0xF031,
-	IOIMAGE_RWOSIZE		: 0xF035,
-	IOIMAGE_CLEARI		: 0xF040,
-	IOIMAGE_CLEARO		: 0xF050,
-	IOIMAGE_RWIOB		: 0xF060,
-	DEVICE_DATA			: 0xF100,
-	DEVDATA_ADSSTATE	: 0x0000,
-	DEVDATA_DEVSTATE	: 0x0002
-};
 
 var findStringEnd = function(data, offset) {
     if (!offset) { offset = 0; }
@@ -1227,98 +1124,28 @@ var findStringEnd = function(data, offset) {
     return endpos;
 };
 
+var getAdsState = function(id){
+	for(var i =0; adsProtocol.states.length; i++){
+		if(adsProtocol.states[i].id == id)
+			return adsProtocol.states[i].name;
+	}
+	return "unknow";
+}
 
-var getError = function(errorId) {
-    var msg = "";
-    switch(errorId) {
-        case 1 : msg = "Internal error"; break;
-        case 2 : msg = "No Rtime"; break;
-        case 3 : msg = "Allocation locked memory error"; break;
-        case 4 : msg = "Insert mailbox error"; break;
-        case 5 : msg = "Wrong receive HMSG"; break;
-        case 6 : msg = "target port not found"; break;
-        case 7 : msg = "target machine not found"; break;
-        case 8 : msg = "Unknown command ID"; break;
-        case 9 : msg = "Bad task ID"; break;
-        case 10: msg = "No IO"; break;
-        case 11: msg = "Unknown AMS command"; break;
-        case 12: msg = "Win 32 error"; break;
-        case 13: msg = "Port not connected"; break;
-        case 14: msg = "Invalid AMS length"; break;
-        case 15: msg = "Invalid AMS Net ID"; break;
-        case 16: msg = "Low Installation level"; break;
-        case 17: msg = "No debug available"; break;
-        case 18: msg = "Port disabled"; break;
-        case 19: msg = "Port already connected"; break;
-        case 20: msg = "AMS Sync Win32 error"; break;
-        case 21: msg = "AMS Sync Timeout"; break;
-        case 22: msg = "AMS Sync AMS error"; break;
-        case 23: msg = "AMS Sync no index map"; break;
-        case 24: msg = "Invalid AMS port"; break;
-        case 25: msg = "No memory"; break;
-        case 26: msg = "TCP send error"; break;
-        case 27: msg = "Host unreachable"; break;
-                   
-        case 1792: msg="error class <device error>"; break;
-        case 1793: msg="Service is not supported by server"; break;
-        case 1794: msg="invalid index group"; break;
-        case 1795: msg="invalid index offset"; break;
-        case 1796: msg="reading/writing not permitted"; break;
-        case 1797: msg="parameter size not correct"; break;
-        case 1798: msg="invalid parameter value(s)"; break;
-        case 1799: msg="device is not in a ready state"; break;
-        case 1800: msg="device is busy"; break;
-        case 1801: msg="invalid context (must be in Windows)"; break;
-        case 1802: msg="out of memory"; break;
-        case 1803: msg="invalid parameter value(s)"; break;
-        case 1804: msg="not found (files, ...)"; break;
-        case 1805: msg="syntax error in command or file"; break;
-        case 1806: msg="objects do not match"; break;
-        case 1807: msg="object already exists"; break;
-        case 1808: msg="symbol not found"; break;
-        case 1809: msg="symbol version invalid"; break;
-        case 1810: msg="server is in invalid state"; break;
-        case 1811: msg="AdsTransMode not supported"; break;
-        case 1812: msg="Notification handle is invalid"; break;
-        case 1813: msg="Notification client not registered"; break;
-        case 1814: msg="no more notification handles"; break;
-        case 1815: msg="size for watch too big"; break;
-        case 1816: msg="device not initialized"; break;
-        case 1817: msg="device has a timeout"; break;
-        case 1818: msg="query interface failed"; break;
-        case 1819: msg="wrong interface required"; break;
-        case 1820: msg="class ID is invalid"; break;
-        case 1821: msg="object ID is invalid"; break;
-        case 1822: msg="request is pending"; break;
-        case 1823: msg="request is aborted"; break;
-        case 1824: msg="signal warning"; break;
-        case 1825: msg="invalid array index"; break;
-        case 1826: msg="symbol not active -> release handle and try again"; break;
-        case 1827: msg="access denied"; break;
-        case 1856: msg="Error class <client error>"; break;
-        case 1857: msg="invalid parameter at service"; break;
-        case 1858: msg="polling list is empty"; break;
-        case 1859: msg="var connection already in use"; break;
-        case 1860: msg="invoke ID in use"; break;
-        case 1861: msg="timeout elapsed"; break;
-        case 1862: msg="error in win32 subsystem"; break;
-        case 1863: msg="Invalid client timeout value"; break;
-        case 1864: msg="ads-port not opened"; break;
-        case 1872: msg="internal error in ads sync"; break;
-        case 1873: msg="hash table overflow"; break;
-        case 1874: msg="key not found in hash"; break;
-        case 1875: msg="no more symbols in cache"; break;
-        case 1876: msg="invalid response received"; break;
-        case 1877: msg="sync port is locked"; break;
-    }
-    return msg;
-};
+var getError = function(id){
+	for(var i =0; adsProtocol.errors.length; i++){
+		if(adsProtocol.errors[i].id == id)
+			return adsProtocol.errors[i].msg;
+	}
+	return "unknow error";
+}
+
 
 /**
  * Module exports.
  */
 
-module.exports = exports = Client;
+module.exports = exports = AdsClient;
 
 
 
