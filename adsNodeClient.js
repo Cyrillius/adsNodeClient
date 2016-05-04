@@ -789,8 +789,6 @@ AdsClient.prototype.onData = function (data){
 				    			timestamp: response.data.stamps[i].timeStamp 
 			    			}
 			    		};
-			    		log.debug("value change",m);
-			    		this.client.emit('valueChange',m);
 			    	
 			    		switch (adsProtocol.types[h.type].bufferType) {
 			    			case "uint8": 		m.data.value = response.data.stamps[i].samples[j].value = stampsFrame.readUInt8(readedByte); 				break;
@@ -803,6 +801,9 @@ AdsClient.prototype.onData = function (data){
 					        case "doubleLE": 	m.data.value = response.data.stamps[i].samples[j].value = stampsFrame.readDoubleLE(readedByte);  			break;
 			    			default: response.data.stamps[i].samples[j].value = stampsFrame.slice(readedByte, readedByte + response.data.stamps[i].samples[j].sampleLength);	break;
 			    		}
+			    		
+			    		log.debug("value change",m);
+			    		this.client.emit('valueChange',m);
 			    	}
 		    		readedByte += response.data.stamps[i].samples[j].sampleLength;   		
     			}
